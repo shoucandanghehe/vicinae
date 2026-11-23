@@ -1,0 +1,81 @@
+name: Pinyin platform check
+
+on:
+  push:
+    branches: [ci/app-pinyin-search]
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    name: Windows x64 — build and installer
+    runs-on: windows-2022
+    timeout-minutes: 80
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - uses: jurplel/install-qt-action@v4.3.1
+        with:
+          version: 6.10.1
+          host: windows
+          target: desktop
+          arch: win64_msvc2022_64
+          modules: qtshadertools qtimageformats qtmultimedia
+      - name: Configure
+        run: cmake --preset windows-ci
+      - name: Build
+        run: cmake --build --preset windows-ci --parallel 4
+      - name: Package installer
+        run: ./scripts/mkinstaller.ps1 -BuildDir build
+      - name: Verify packaged dictionary
+        run: |
+          $source = 'build/_deps/cpp-pinyin2-src/data/dialects/mandarin'
+          foreach ($root in 'build/pinyin/mandarin', 'build/stage/pinyin/mandarin') {
+            foreach ($file in (Get-ChildItem $source -File)) {
+              $path = Join-Path $root $file.Name
+              if (!(Test-Path -LiteralPath $path) -or (Get-FileHash -LiteralPath $path).Hash -ne (Get-FileHash -LiteralPath $file.FullName).Hash) {
+                throw "Missing or changed dictionary file: $path"
+              }
+            }
+          }
+          if (!(Test-Path 'build/vicinae-x64-setup.exe')) { throw 'Installer not built' }
+
+  macos:
+    name: macOS arm64 — build and app bundle
+    runs-on: macos-26
+    timeout-minutes: 80
+    env:
+      QT_VERSION: 6.11.1
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+      - name: Install dependencies
+        run: make mac-deps
+      - name: Configure
+        run: >-
+          cmake -S . -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=ON -DLOCAL_AI=ON
+          -DQT_DIR="$HOME/Qt/$QT_VERSION/macos"
+      - name: Build
+        run: cmake --build build --parallel 4
+      - name: Run platform tests
+        run: |
+          ./build/bin/vicinae-glyph-tests
+          ./build/bin/vicinae-fuzzy-tests
+          ./build/bin/xdgpp-tests
+          ./build/bin/scriptcommand-tests
+      - name: Assemble app bundle
+        run: make mac-bundle
+      - name: Verify packaged dictionary
+        run: |
+          dict=build/_deps/cpp-pinyin2-src/data/dialects/mandarin
+          diff -qr "$dict" build/Resources/pinyin/mandarin
+          diff -qr "$dict" build/bin/Vicinae.app/Contents/Resources/pinyin/mandarin
